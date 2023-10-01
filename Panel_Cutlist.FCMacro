@@ -1,0 +1,159 @@
+__title__   = "Panel Cutlist"
+__author__  = "Massimiliano Ravelli <massimiliano.ravelli@gmail.com"
+__version__ = "0.0.1"
+__date__    = "2023-10-01"
+__Comment__ = "Writes a cutlistoptimizer compatible cutlist"
+__Help__ = "https://github.com/madron/freecad-macro"
+__Status__ = "alpha"
+__Requires__ = "FreeCAD 0.20"
+
+
+import csv
+from io import StringIO
+from pathlib import Path
+from typing import Any, List
+
+
+def get_panels() -> List[Any]:
+    panels = []
+    for obj in FreeCAD.ActiveDocument.Objects:
+        wb = obj.TypeId[0:obj.TypeId.find("::")]
+        shape = obj.TypeId[obj.TypeId.find("::")+2:]
+        if wb == "Part":
+            if shape == 'Box':
+                panels.append(obj)
+    return panels
+
+
+def get_panels_data():
+    return [get_panel_data(panel) for panel in get_panels()]
+
+
+def get_panel_data(panel):
+    grain_directions = [direction for direction in getattr(panel, 'Grain', []) if not direction == 'x']
+    if grain_directions:
+        data = get_panel_dimensions_with_grain_direction(panel)
+    else:
+        data = get_panel_dimensions_without_grain_direction(panel)
+    data['length'] = data['length'].getValueAs('mm')
+    data['width'] = data['width'].getValueAs('mm')
+    data['thickness'] = data['thickness'].getValueAs('mm')
+    data['name'] = panel.Label
+    return data
+
+
+def get_panel_dimensions_with_grain_direction(panel):
+    faces_grain = [(i, direction) for (i, direction) in enumerate(panel.Grain) if not direction == 'x']
+    face_number = faces_grain[0][0]
+    grain_direction = faces_grain[0][1]
+    face = panel.Shape.Faces[face_number]
+    plane = get_face_plane(face)
+    if plane == 'xy':
+        thickness = panel.Height
+        if grain_direction == 'v':
+            length = panel.Length
+            width = panel.Width
+        if grain_direction == 'h':
+            length = panel.Width
+            width = panel.Length
+    if plane == 'yz':
+        thickness = panel.Length
+        if grain_direction == 'v':
+            length = panel.Height
+            width = panel.Width
+        if grain_direction == 'h':
+            length = panel.Width
+            width = panel.Height
+    if plane == 'xz':
+        thickness = panel.Width
+        if grain_direction == 'v':
+            length = panel.Height
+            width = panel.Length
+        if grain_direction == 'h':
+            length = panel.Length
+            width = panel.Height
+    return dict(thickness=thickness, length=length, width=width, grain_direction='v')
+
+
+def get_panel_dimensions_without_grain_direction(panel):
+    size_dict = dict(
+        x=round(panel.Length, 1),
+        y=round(panel.Width, 1),
+        z=round(panel.Height, 1),
+    )
+    sizes = list(size_dict.values())
+    thickness = get_min_size(sizes)
+    length = get_max_size(sizes)
+    width = sizes[0]
+    return dict(thickness=thickness, length=length, width=width, grain_direction='')
+
+
+def get_face_plane(face):
+    plane = ''
+    box = face.BoundBox
+    if not box.XLength == 0:
+        plane += 'x'
+    if not box.YLength == 0:
+        plane += 'y'
+    if not box.ZLength == 0:
+        plane += 'z'
+    return plane
+
+
+def get_min_size(sizes: List[float]):
+    return get_ref_size('__lt__', sizes)
+
+
+def get_max_size(sizes: List[float]):
+    return get_ref_size('__gt__', sizes)
+
+
+def get_ref_size(ref_function: str, sizes: List[float]):
+    ref_size = None
+    for v in sizes:
+        if not ref_size:
+            ref_size = v
+        if getattr(v, ref_function)(ref_size):
+            ref_size = v
+    sizes.remove(ref_size)
+    return ref_size
+
+
+def get_cutlist(panels):
+    csvfile = StringIO()
+    fieldnames = ['Length', 'Width', 'Qty', 'Material', 'Label', 'Enabled', 'Grain direction']
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    for panel in panels:
+        x = panel['length']
+        length = int(x) if x == round(x, 0) else x
+        x = panel['width']
+        width = int(x) if x == round(x, 0) else x
+        x = panel['thickness']
+        thickness = int(x) if x == round(x, 0) else x
+        writer.writerow(
+            {
+                'Length': length,
+                'Width': width,
+                'Qty': 1,
+                'Label': panel['name'],
+                'Material': thickness,
+                'Enabled': 'true',
+                'Grain direction': panel['grain_direction'],
+            }
+        )
+    return csvfile.getvalue()
+
+
+def write_cutlist(panels):
+    content = get_cutlist(panels)
+    path = Path(FreeCAD.ActiveDocument.FileName)
+    name = '{}-cutlist.csv'.format(path.name.rstrip(path.suffix))
+    file_path = path.parent / name
+    file_path.write_text(content)
+    print('Wrote cutlist to {}'.format(file_path))
+
+
+if FreeCAD.ActiveDocument != None:
+    panels = get_panels_data()
+    write_cutlist(panels)
